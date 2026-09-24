@@ -111,6 +111,37 @@ SZ_HELPER_AUTO sz_size_t sz_utf8_uncased_fold_icelake_caseless_chunk_( //
     return copy_length;
 }
 
+SZ_HELPER_AUTO sz_size_t sz_utf8_uncased_fold_icelake_supplementary_chunk_( //
+    __m512i source_u8x64, __mmask64 load_m64, sz_size_t chunk_size,          //
+    __mmask64 is_lead_m64, __mmask64 is_four_byte_lead_m64, __mmask64 malformed_lead_m64, sz_ptr_t target) {
+
+    __m512i const a_upper_u8x64 = _mm512_set1_epi8('A');
+    __m512i const subtract26_u8x64 = _mm512_set1_epi8(26);
+    __m512i const ascii_case_offset_u8x64 = _mm512_set1_epi8(0x20);
+
+    __mmask64 caseless_second_m64 = _mm512_cmpge_epu8_mask(source_u8x64, _mm512_set1_epi8((char)0x9F)) >> 1;
+    __mmask64 punctuation_second_m64 =
+        _mm512_cmple_epu8_mask(_mm512_sub_epi8(source_u8x64, _mm512_set1_epi8((char)0x80)), _mm512_set1_epi8(3)) >> 1;
+    __mmask64 forms_second_m64 =
+        _mm512_cmple_epu8_mask(_mm512_sub_epi8(source_u8x64, _mm512_set1_epi8((char)0xB8)), _mm512_set1_epi8(3)) >> 1;
+    __mmask64 caseless_three_m64 =
+        (_mm512_cmpeq_epi8_mask(source_u8x64, _mm512_set1_epi8((char)0xE2)) & punctuation_second_m64) |
+        (_mm512_cmpeq_epi8_mask(source_u8x64, _mm512_set1_epi8((char)0xEF)) & forms_second_m64);
+    __mmask64 stop_m64 = (is_lead_m64 & ~is_four_byte_lead_m64 & ~caseless_three_m64) |
+                         (is_four_byte_lead_m64 & ~caseless_second_m64) | malformed_lead_m64;
+    stop_m64 &= load_m64;
+    sz_size_t fold_length = stop_m64 ? (sz_size_t)_tzcnt_u64(stop_m64) : chunk_size;
+    __mmask64 incomplete_m64 = ((is_four_byte_lead_m64 & ~sz_u64_mask_until_(fold_length > 3 ? fold_length - 3 : 0)) |
+                                (caseless_three_m64 & ~sz_u64_mask_until_(fold_length > 2 ? fold_length - 2 : 0))) &
+                               sz_u64_mask_until_(fold_length);
+    if (incomplete_m64) fold_length = (sz_size_t)_tzcnt_u64(incomplete_m64);
+    if (fold_length == 0) return 0;
+
+    __mmask64 prefix_m64 = sz_u64_mask_until_(fold_length);
+    _mm512_mask_storeu_epi8(target, prefix_m64, sz_icelake_fold_ascii_in_prefix_(source_u8x64, prefix_m64));
+    return fold_length;
+}
+
 /**
  *  @brief Folds a chunk of Latin text in place: ASCII, Latin-1 Supplement (C2-C3),
  *      Latin Extended-A/B (C4-C6), and Latin Extended Additional (E1 B8-BB) - the working set
@@ -454,6 +485,18 @@ SZ_API_COMPTIME sz_size_t sz_utf8_uncased_fold_icelake(sz_cptr_t source, sz_size
             if (handled) {
                 target += handled, source += handled, source_length -= handled;
                 continue;
+            }
+        }
+        if (is_four_byte_lead_m64) {
+            sz_u8_t const first_lead = (sz_u8_t)source[_tzcnt_u64(is_lead_m64)];
+            if (first_lead >= 0xF0 || first_lead == 0xE2 || first_lead == 0xEF) {
+                sz_size_t handled = sz_utf8_uncased_fold_icelake_supplementary_chunk_(
+                    source_vec.zmm, load_m64, chunk_size, is_lead_m64, is_four_byte_lead_m64, malformed_lead_m64,
+                    target);
+                if (handled) {
+                    target += handled, source += handled, source_length -= handled;
+                    continue;
+                }
             }
         }
         // Mixed or complex chunks continue through the per-script fast paths below
