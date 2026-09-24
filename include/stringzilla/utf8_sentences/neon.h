@@ -129,7 +129,7 @@ SZ_HELPER_AUTO uint8x16_t sz_utf8_sentence_break_bmp_class_neon_(uint8x16_t high
 }
 
 /** @brief  Sentence_Break class byte for sixteen ASTRAL codepoints over the 20-bit offset = cp - 0x10000 (5-nibble
- *          cascade), the NEON twin of @ref sz_utf8_sentence_break_astral_class_haswell_. Per-lane bytes:
+ *          cascade). Per-lane bytes:
  *          @p plane = (offset>>16)&0xFF (low nibble meaningful), @p high = (offset>>8)&0xFF, @p low = offset&0xFF.
  *          Bit-exact with `sz_rune_sentence_break_property` over all astral. Operates on one quarter. */
 SZ_HELPER_AUTO uint8x16_t sz_utf8_sentence_break_astral_class_neon_(uint8x16_t plane_u8x16, uint8x16_t high_u8x16,

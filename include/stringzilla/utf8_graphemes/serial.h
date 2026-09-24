@@ -27,10 +27,9 @@ SZ_API_COMPTIME sz_u8_t sz_rune_grapheme_break_property(sz_rune_t rune) {
         sz_u8_t const index = sz_utf8_grapheme_break_stage_sub_[sub * 16u + (rune & 0xFu)];
         return sz_utf8_grapheme_break_id_to_desc_[index];
     }
-    for (sz_size_t range = 0; range < sz_utf8_grapheme_break_astral_count_k; ++range)
-        if (rune >= sz_utf8_grapheme_break_astral_lo_[range] && rune <= sz_utf8_grapheme_break_astral_hi_[range])
-            return sz_utf8_grapheme_break_id_to_desc_[sz_utf8_grapheme_break_astral_id_[range]];
-    return 0;
+    sz_size_t const range = sz_rune_range_find_(sz_utf8_grapheme_break_astral_lo_, sz_utf8_grapheme_break_astral_hi_,
+                                                sz_utf8_grapheme_break_astral_count_k, rune);
+    return range != SZ_SIZE_MAX ? sz_utf8_grapheme_break_id_to_desc_[sz_utf8_grapheme_break_astral_id_[range]] : 0;
 }
 
 /**

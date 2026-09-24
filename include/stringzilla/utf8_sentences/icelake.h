@@ -72,9 +72,7 @@ SZ_HELPER_AUTO __m512i sz_utf8_sentence_break_cold_compact_icelake_( //
  *          is resolved by an in-register `vpermi2b` page network over `sz_utf8_sentence_break_flat_lut_0800_`; the big
  *          homogeneous OLetter blocks (CJK/Hangul/...) by arithmetic range compares (zero data); the cold 3-byte-BMP
  *          residue by a page-compressed flat table read with one `vpgatherdd` per sixteen lanes (see
- *          @ref sz_utf8_sentence_break_cold_compact_icelake_). No scalar per-lane loop, no stack round-trip. Astral
- *          (4-byte) lanes are reconstructed to full 21-bit codepoints in register (four 16-lane chunks) and resolved
- *          through the canonical sorted astral range list with arithmetic compares, all 64 lanes uniformly.
+ *          @ref sz_utf8_sentence_break_cold_compact_icelake_).
  *
  *  @param  raw_window_u8x64   The raw 64 input bytes (codepoint lead/continuation bytes, one lane each here).
  *  @param  raw_next1_u8x64    Byte at lane+1 (first continuation), @p raw_next2_u8x64 lane+2,
@@ -111,7 +109,7 @@ SZ_HELPER_AUTO __m512i sz_utf8_sentence_break_classify_window_icelake_(         
     for (int range = 0; range < sz_utf8_sentence_break_big_oletter_count_k; ++range) {
         sz_u32_t const lo = sz_utf8_sentence_break_big_oletter_lo_[range];
         sz_u32_t const hi = sz_utf8_sentence_break_big_oletter_hi_[range];
-        if (lo >= 0x10000u) continue; // astral OLetter handled by the astral sweep below
+        if (lo >= 0x10000u) continue;
         __m512i const lo_hi_u8x64 = _mm512_set1_epi8((char)(sz_u8_t)(lo >> 8));
         __m512i const lo_lo_u8x64 = _mm512_set1_epi8((char)(sz_u8_t)lo);
         __m512i const hi_hi_u8x64 = _mm512_set1_epi8((char)(sz_u8_t)(hi >> 8));
@@ -158,69 +156,20 @@ SZ_HELPER_AUTO __m512i sz_utf8_sentence_break_classify_window_icelake_(         
     classes_u8x64 = _mm512_mask_mov_epi8(classes_u8x64, oletter_m64,
                                          _mm512_set1_epi8((char)sz_sentence_break_oletter_k));
 
-    // Astral (4-byte) lanes: reconstruct the full 21-bit codepoint per lane and resolve through the sorted astral
-    // range list with arithmetic compares (no table lookup at all). cp = ((b0&7)<<18)|((b1&0x3F)<<12)|((b2&0x3F)<<6)|(b3&0x3F).
-    // The 21-bit value exceeds a byte lane, so we widen to 32-bit lanes in four 16-lane chunks and compare each
-    // chunk against every astral range, blending the matching class back. The whole block only fires when a
-    // 4-byte lead is present (corpus astral residue < 0.1%), keeping the common path branch-free.
     if (is_astral_m64) {
-        __m512i const b0_u8x64 = _mm512_and_si512(raw_window_u8x64, _mm512_set1_epi8(0x07));
-        __m512i const b1_u8x64 = _mm512_and_si512(raw_next1_u8x64, _mm512_set1_epi8(0x3F));
-        __m512i const b2_u8x64 = _mm512_and_si512(raw_next2_u8x64, _mm512_set1_epi8(0x3F));
-        __m512i const b3_u8x64 = _mm512_and_si512(raw_next3_u8x64, _mm512_set1_epi8(0x3F));
-        __m512i const lane_identity_u8x64 = sz_utf8_lane_identity_icelake_();
-        for (int chunk = 0; chunk < 4; ++chunk) {
-            // Bring this chunk's 16 bytes to the low 16 lanes via a runtime permute, then widen to 32-bit lanes.
-            __m512i const select_u8x64 = _mm512_add_epi8(lane_identity_u8x64, _mm512_set1_epi8((char)(chunk * 16)));
-            __m512i const w0_u32x16 = _mm512_cvtepu8_epi32(
-                _mm512_castsi512_si128(_mm512_permutexvar_epi8(select_u8x64, b0_u8x64)));
-            __m512i const w1_u32x16 = _mm512_cvtepu8_epi32(
-                _mm512_castsi512_si128(_mm512_permutexvar_epi8(select_u8x64, b1_u8x64)));
-            __m512i const w2_u32x16 = _mm512_cvtepu8_epi32(
-                _mm512_castsi512_si128(_mm512_permutexvar_epi8(select_u8x64, b2_u8x64)));
-            __m512i const w3_u32x16 = _mm512_cvtepu8_epi32(
-                _mm512_castsi512_si128(_mm512_permutexvar_epi8(select_u8x64, b3_u8x64)));
-            __m512i const cp_u32x16 = _mm512_or_si512(
-                _mm512_or_si512(_mm512_slli_epi32(w0_u32x16, 18), _mm512_slli_epi32(w1_u32x16, 12)),
-                _mm512_or_si512(_mm512_slli_epi32(w2_u32x16, 6), w3_u32x16));
-            __mmask16 const lane_is_four_m16 = (__mmask16)((is_astral_m64 >> (chunk * 16)) & 0xFFFFu);
-            __m512i astral_class_u32x16 = _mm512_setzero_si512();
-            __mmask16 matched_m16 = 0;
-            // Big homogeneous OLetter blocks that live above the BMP (CJK Extension B+, astral Hangul/Kana, ...) are
-            // skipped by the BMP OLetter loop above and are NOT duplicated in the astral range list; the serial
-            // reference resolves them from `big_oletter` FIRST, so check them here before the astral list with the
-            // same first-match-wins precedence.
-            for (int range = 0; range < sz_utf8_sentence_break_big_oletter_count_k; ++range) {
-                sz_u32_t const lo = sz_utf8_sentence_break_big_oletter_lo_[range];
-                sz_u32_t const hi = sz_utf8_sentence_break_big_oletter_hi_[range];
-                if (lo < 0x10000u) continue; // BMP OLetter blocks are resolved by the page LUT / flat gather path
-                __mmask16 const in_range_m16 = _mm512_cmpge_epu32_mask(cp_u32x16, _mm512_set1_epi32((int)lo)) &
-                                               _mm512_cmple_epu32_mask(cp_u32x16, _mm512_set1_epi32((int)hi)) &
-                                               lane_is_four_m16 & ~matched_m16;
-                astral_class_u32x16 = _mm512_mask_mov_epi32(astral_class_u32x16, in_range_m16,
-                                                            _mm512_set1_epi32((int)sz_sentence_break_oletter_k));
-                matched_m16 |= in_range_m16;
-            }
-            for (int range = 0; range < sz_utf8_sentence_break_astral_count_k; ++range) {
-                sz_u32_t const lo = sz_utf8_sentence_break_astral_lo_[range];
-                sz_u32_t const hi = sz_utf8_sentence_break_astral_hi_[range];
-                if (hi < 0x10000u) continue; // BMP ranges are already resolved by the page LUT / flat gather / OLetter
-                __mmask16 const in_range_m16 = _mm512_cmpge_epu32_mask(cp_u32x16, _mm512_set1_epi32((int)lo)) &
-                                               _mm512_cmple_epu32_mask(cp_u32x16, _mm512_set1_epi32((int)hi)) &
-                                               lane_is_four_m16 & ~matched_m16;
-                astral_class_u32x16 = _mm512_mask_mov_epi32(
-                    astral_class_u32x16, in_range_m16,
-                    _mm512_set1_epi32((int)sz_utf8_sentence_break_astral_cls_[range]));
-                matched_m16 |= in_range_m16;
-            }
-            // Narrow the 16 32-bit astral classes to 16 bytes (`vpmovdb`), broadcast them back to this chunk's byte
-            // lanes via `vpexpandb`, and blend - fully vectorized, no scalar per-lane writeback.
-            __m128i const astral_bytes_u8x16 = _mm512_cvtepi32_epi8(astral_class_u32x16);
-            __m512i const astral_broadcast_u8x64 = _mm512_maskz_expand_epi8(_cvtu64_mask64(0xFFFFull << (chunk * 16)),
-                                                                            _mm512_castsi128_si512(astral_bytes_u8x16));
-            classes_u8x64 = _mm512_mask_mov_epi8(classes_u8x64, _cvtu64_mask64((sz_u64_t)matched_m16 << (chunk * 16)),
-                                                 astral_broadcast_u8x64);
+        sz_u8_t classes[64], b0[64], b1[64], b2[64], b3[64];
+        _mm512_storeu_si512(classes, classes_u8x64);
+        _mm512_storeu_si512(b0, raw_window_u8x64);
+        _mm512_storeu_si512(b1, raw_next1_u8x64);
+        _mm512_storeu_si512(b2, raw_next2_u8x64);
+        _mm512_storeu_si512(b3, raw_next3_u8x64);
+        for (sz_u64_t lanes = _cvtmask64_u64(is_astral_m64); lanes; lanes &= lanes - 1) {
+            int const lane = sz_u64_ctz(lanes);
+            sz_rune_t const rune = ((sz_rune_t)(b0[lane] & 0x07u) << 18) | ((sz_rune_t)(b1[lane] & 0x3Fu) << 12) |
+                                   ((sz_rune_t)(b2[lane] & 0x3Fu) << 6) | (sz_rune_t)(b3[lane] & 0x3Fu);
+            classes[lane] = sz_rune_sentence_break_property(rune);
         }
+        classes_u8x64 = _mm512_loadu_si512(classes);
     }
     return classes_u8x64;
 }
