@@ -33,10 +33,9 @@ SZ_API_COMPTIME sz_u16_t sz_rune_line_break_property(sz_rune_t rune) {
         sz_u8_t const index = sz_utf8_line_break_trie_leaf_[leaf * sz_utf8_line_break_trie_block_k + within];
         return sz_utf8_line_break_palette_[index];
     }
-    for (sz_size_t range = 0; range < sz_utf8_line_break_astral_count_k; ++range)
-        if (rune >= sz_utf8_line_break_astral_lo_[range] && rune <= sz_utf8_line_break_astral_hi_[range])
-            return sz_utf8_line_break_palette_[sz_utf8_line_break_astral_idx_[range]];
-    return sz_utf8_line_break_palette_[0];
+    sz_size_t const range = sz_rune_range_find_(sz_utf8_line_break_astral_lo_, sz_utf8_line_break_astral_hi_,
+                                                sz_utf8_line_break_astral_count_k, rune);
+    return sz_utf8_line_break_palette_[range != SZ_SIZE_MAX ? sz_utf8_line_break_astral_idx_[range] : 0];
 }
 
 /** @brief Resolved Line_Break class (palette bits 0-5) of a descriptor. */

@@ -192,6 +192,18 @@ SZ_HELPER_AUTO sz_bool_t sz_utf8_incomplete_tail_(sz_cptr_t text, sz_cptr_t end)
     return sz_true_k;
 }
 
+SZ_HELPER_INLINE sz_size_t sz_rune_range_find_(sz_u32_t const *lo, sz_u32_t const *hi, sz_size_t count,
+                                               sz_rune_t rune) {
+    if (count == 0 || rune < lo[0]) return SZ_SIZE_MAX;
+    sz_size_t base = 0;
+    while (count > 1) {
+        sz_size_t const half = count / 2;
+        base = lo[base + half] <= rune ? base + half : base;
+        count -= half;
+    }
+    return rune <= hi[base] ? base : SZ_SIZE_MAX;
+}
+
 #pragma endregion Rune Codec
 
 SZ_API_COMPTIME sz_size_t sz_utf8_count_serial(sz_cptr_t text, sz_size_t length) {

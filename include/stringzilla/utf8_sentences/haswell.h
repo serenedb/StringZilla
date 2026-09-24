@@ -28,11 +28,10 @@ extern "C" {
 #pragma region In register vectorized classifier
 
 /*  The AVX2 twin of the Ice Lake Sentence_Break classifier: a contiguous run of codepoints resolves to per-codepoint
- *  Sentence_Break class bytes with ZERO per-lane scalar loop and NO serial deferral. Each 64-byte window lives as two
+ *  Sentence_Break class bytes. Each 64-byte window lives as two
  *  `__m256i` halves. The BMP is ONE indexed lookup per codepoint into a page-compressed flat table - `bmp_page_lut_[cp >> 8]`
  *  picks one of 57 distinct 256-byte pages, then `flat_bmp_[page * 256 + (cp & 0xFF)]` is the class - fetched with
- *  `vpgatherdd`; 4-byte leads still ride a 4-stage astral `vpshufb` cascade. Both emit the Sentence_Break class byte
- *  directly, bit-identical with `sz_rune_sentence_break_property` over the entire code space.
+ *  `vpgatherdd`. The class bytes are bit-identical with `sz_rune_sentence_break_property` over the entire code space.
  *
  *  The flat table is chosen for port pressure, not instruction count: `vpshufb` cross-lane shuffles are port-5-only,
  *  so any dependent shuffle cascade saturates that single port, while `vpgatherdd` issues on the load ports and
@@ -45,45 +44,6 @@ extern "C" {
 SZ_HELPER_AUTO __m256i sz_utf8_sentence_break_bmp_class_haswell_(__m256i high_bytes_u8x32, __m256i low_bytes_u8x32) {
     return sz_utf8_rune_flat_lookup_haswell_(sz_utf8_sentence_break_bmp_page_lut_, sz_utf8_sentence_break_flat_bmp_,
                                              high_bytes_u8x32, low_bytes_u8x32);
-}
-
-/** @brief  Sentence_Break class byte for thirty-two ASTRAL codepoints over the 20-bit offset = cp - 0x10000 (5-nibble
- *          cascade). Per-lane bytes: @p plane_u8x32 = (offset>>16)&0xFF (low nibble meaningful), @p high_u8x32 =
- *          (offset>>8)&0xFF, @p low_u8x32 = offset&0xFF. Bit-exact with `sz_rune_sentence_break_property` over all
- *          astral. */
-SZ_HELPER_AUTO __m256i sz_utf8_sentence_break_astral_class_haswell_(__m256i plane_u8x32, __m256i high_u8x32,
-                                                                    __m256i low_u8x32) {
-    __m256i const low_nibble_mask_u8x32 = _mm256_set1_epi8(0x0F);
-    __m256i const n4_u8x32 = _mm256_and_si256(plane_u8x32, low_nibble_mask_u8x32);
-    __m256i const n3_u8x32 = _mm256_and_si256(_mm256_srli_epi16(high_u8x32, 4), low_nibble_mask_u8x32);
-    __m256i const stage1_index_u8x32 = _mm256_or_si256(_mm256_slli_epi16(n4_u8x32, 4), n3_u8x32);
-    __m256i const page_u8x32 = sz_utf8_rune_lut256_haswell_(sz_utf8_sentence_break_haswell_astral_stage1_,
-                                                            stage1_index_u8x32);
-    __m256i const n2_u8x32 = _mm256_and_si256(high_u8x32, low_nibble_mask_u8x32);
-    __m256i const leaf2_lo_u8x32 = sz_utf8_rune_cascade_stage_haswell_(
-        sz_utf8_sentence_break_haswell_astral_stage2_lo_, sz_utf8_sentence_break_haswell_astral_stage2_lo_count_k / 16,
-        page_u8x32, n2_u8x32);
-    __m256i const n1_u8x32 = _mm256_and_si256(_mm256_srli_epi16(low_u8x32, 4), low_nibble_mask_u8x32);
-    __m256i const leaf_lo_u8x32 = sz_utf8_rune_cascade_stage_haswell_(
-        sz_utf8_sentence_break_haswell_astral_stage3_lo_, sz_utf8_sentence_break_haswell_astral_stage3_lo_count_k / 16,
-        leaf2_lo_u8x32, n1_u8x32);
-    __m256i const leaf_hi_u8x32 = sz_utf8_rune_cascade_stage_haswell_(
-        sz_utf8_sentence_break_haswell_astral_stage3_hi_, sz_utf8_sentence_break_haswell_astral_stage3_hi_count_k / 16,
-        leaf2_lo_u8x32, n1_u8x32);
-    __m256i const n0_u8x32 = _mm256_and_si256(low_u8x32, low_nibble_mask_u8x32);
-    __m256i const leaf_group_u8x32 = _mm256_or_si256(
-        _mm256_and_si256(_mm256_srli_epi16(leaf_lo_u8x32, 4), low_nibble_mask_u8x32),
-        _mm256_slli_epi16(leaf_hi_u8x32, 4));
-    __m256i const leaf_low_nibble_u8x32 = _mm256_and_si256(leaf_lo_u8x32, low_nibble_mask_u8x32);
-    __m256i const stage4_lut_index_u8x32 = _mm256_or_si256(_mm256_slli_epi16(leaf_low_nibble_u8x32, 4), n0_u8x32);
-    __m256i result_u8x32 = _mm256_setzero_si256();
-    for (int group = 0; group < (int)sz_utf8_sentence_break_haswell_astral_leaf_groups_k; ++group) {
-        __m256i const value_u8x32 = sz_utf8_rune_lut256_haswell_(
-            sz_utf8_sentence_break_haswell_astral_stage4_groups_ + group * 256, stage4_lut_index_u8x32);
-        __m256i const here_u8x32 = _mm256_cmpeq_epi8(leaf_group_u8x32, _mm256_set1_epi8((char)group));
-        result_u8x32 = _mm256_blendv_epi8(result_u8x32, value_u8x32, here_u8x32);
-    }
-    return result_u8x32;
 }
 
 /** @brief  Per-byte-lane Sentence_Break class for one decoded window half, fully in-register and zero-scalar - the
@@ -133,12 +93,7 @@ SZ_HELPER_AUTO __m256i sz_utf8_sentence_break_classify_half_haswell_( //
 
         //  Split the 4-byte lanes on their blind plane (cp bits[16..20]) by VALUE, matching serial/icelake:
         //    plane == 0      -> BMP codepoint (cp = (mid<<8)|alo); resolved by the BMP cascade above.
-        //    plane in [1,16]  -> genuine astral (cp in 0x10000..0x10FFFF); routed to the astral cascade.
         //    plane >= 17      -> cp >= 0x110000 (e.g. `F4 A0 ..`, `F5 ..`); neither BMP nor astral, class Other (0).
-        //  The astral cascade is addressed by the OFFSET plane nibble `plane_u8x32 - 1` (cp - 0x10000) and only its
-        //  low nibble is consumed, so a plane >= 17 lane would alias a valid offset — it MUST be excluded, not just
-        //  left to the cascade. `four_high_u8x32`/`four_low_u8x32` already carry the offset's low 16 bits (== cp's
-        //  low 16 bits).
         __m256i const plane_u8x32 = _mm256_or_si256(
             _mm256_slli_epi16(_mm256_and_si256(raw_u8x32, _mm256_set1_epi8(0x07)), 2),
             sz_utf8_srl8_haswell_(next1_u8x32, 4, 0x03));
@@ -149,13 +104,23 @@ SZ_HELPER_AUTO __m256i sz_utf8_sentence_break_classify_half_haswell_( //
                                                             _mm256_set1_epi8(0x10));
         __m256i const is_astral_lanes_u8x32 = _mm256_and_si256(plane_nonzero_u8x32, plane_le_16_u8x32);
         __m256i const is_overrange_lanes_u8x32 = _mm256_andnot_si256(plane_le_16_u8x32, plane_nonzero_u8x32);
-        __m256i const plane_off_u8x32 = _mm256_sub_epi8(_mm256_and_si256(is_astral_lanes_u8x32, plane_u8x32),
-                                                        _mm256_set1_epi8(1));
-        __m256i const bmp_u8x32 = sz_utf8_sentence_break_bmp_class_haswell_(high_u8x32, low_u8x32);
-        __m256i const astral_u8x32 = sz_utf8_sentence_break_astral_class_haswell_(plane_off_u8x32, high_u8x32,
-                                                                                  low_u8x32);
-        //  BMP for plane 0, astral for plane in [1,16], then force plane >= 17 lanes to Other (0).
-        __m256i const classed_u8x32 = _mm256_blendv_epi8(bmp_u8x32, astral_u8x32, is_astral_lanes_u8x32);
+        __m256i classed_u8x32 = sz_utf8_sentence_break_bmp_class_haswell_(high_u8x32, low_u8x32);
+        sz_u32_t astral_bits = (sz_u32_t)_mm256_movemask_epi8(is_astral_lanes_u8x32);
+        if (astral_bits) {
+            sz_u8_t classes[32], b0[32], b1[32], b2[32], b3[32];
+            _mm256_storeu_si256((__m256i *)classes, classed_u8x32);
+            _mm256_storeu_si256((__m256i *)b0, raw_u8x32);
+            _mm256_storeu_si256((__m256i *)b1, next1_u8x32);
+            _mm256_storeu_si256((__m256i *)b2, next2_u8x32);
+            _mm256_storeu_si256((__m256i *)b3, next3_u8x32);
+            for (; astral_bits; astral_bits &= astral_bits - 1) {
+                int const lane = sz_u32_ctz(astral_bits);
+                sz_rune_t const rune = ((sz_rune_t)(b0[lane] & 0x07u) << 18) | ((sz_rune_t)(b1[lane] & 0x3Fu) << 12) |
+                                       ((sz_rune_t)(b2[lane] & 0x3Fu) << 6) | (sz_rune_t)(b3[lane] & 0x3Fu);
+                classes[lane] = sz_rune_sentence_break_property(rune);
+            }
+            classed_u8x32 = _mm256_loadu_si256((__m256i const *)classes);
+        }
         return _mm256_andnot_si256(is_overrange_lanes_u8x32, classed_u8x32);
     }
     return sz_utf8_sentence_break_bmp_class_haswell_(high_u8x32, low_u8x32);
