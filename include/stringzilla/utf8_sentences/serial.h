@@ -372,6 +372,13 @@ SZ_HELPER_AUTO sz_utf8_sentence_break_window_t sz_utf8_sentence_break_decide_blo
     sz_utf8_sentence_break_frame_t const *frame, sz_u8_t const *dense_classes, sz_size_t count,
     sz_utf8_sentence_break_carry_t *carry, sz_bool_t more_text) {
 
+    if (count == 0) {
+        sz_utf8_sentence_break_window_t empty;
+        empty.breaks = 0;
+        empty.resolved = 0;
+        empty.sb8_resolution = 0;
+        return empty;
+    }
     sz_u64_t const valid = (count >= 64) ? ~0ull : ((1ull << count) - 1);
     sz_u64_t const m_extend = frame->by_class[sz_sentence_break_extend_k];
     sz_u64_t const m_format = frame->by_class[sz_sentence_break_format_k];
